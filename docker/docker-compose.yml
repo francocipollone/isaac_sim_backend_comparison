@@ -1,0 +1,47 @@
+services:
+  isaac-sim:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: isaac-sim-backend-comparison:6.0.0
+    container_name: isaac-sim-backend-comparison
+    working_dir: /ws
+    stdin_open: true
+    tty: true
+    entrypoint: ""
+    command: bash
+    privileged: true
+    network_mode: host
+    ipc: host
+    gpus: all
+    environment:
+      - "DISPLAY=${DISPLAY}"
+      - "ACCEPT_EULA=Y"
+      - "PRIVACY_CONSENT=Y"
+      - "QT_X11_NO_MITSHM=1"
+      - "OMNI_KIT_ALLOW_ROOT=1"
+      - "PYTHONPATH=/ws"
+      # Point run_comparison.sh at the Isaac Sim install that ships in the
+      # nvcr.io/nvidia/isaac-sim:6.0.0 base image. Without this the script's
+      # auto-detect has nothing to find inside the container.
+      - "ISAAC_PATH=/isaac-sim"
+    volumes:
+      - ../:/ws
+      # Benchmark artifacts — the script defaults to /ws/output, so bind-mount
+      # the repo's output/ dir to make the JSON reports + comparison table
+      # accessible on the host without `docker cp`.
+      - ../output:/ws/output
+      # Logs
+      - ../.logs:/isaac-sim/kit/logs/Kit/isaac_sim_backend_comparison/6.0/:rw
+      - ../backend_comparison/example_experience.kit:/isaac-sim/apps/example_experience.kit:rw
+      - kit_cache:/isaac-sim/kit/cache:rw
+      - root_cache:/root/.cache
+      - computecache:/root/.nv/ComputeCache
+      - nvidia_omniverse_cache:/root/.nvidia-omniverse
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+
+volumes:
+  kit_cache:
+  root_cache:
+  computecache:
+  nvidia_omniverse_cache:

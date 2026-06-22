@@ -1,0 +1,87 @@
+# REFERENCE EXAMPLE — this file is NOT loaded by
+# backend_comparison/benchmark_backend.py. That harness runs against the
+# stock Isaac Sim 6.0 experience and toggles FSD at runtime via
+# `--enable-fsd`. This file documents the complete set of Fabric/USDRT
+# knobs and how they wire together; copy it into your own `.kit` when
+# authoring a custom experience. To make the harness consume this file
+# directly, pass `"experience": ".../example_experience.kit"` to the
+# `SimulationApp` kwargs in benchmark_backend.py.
+
+[package]
+description = "isaac_sim_backend_comparison — reference example experience for the USD/USDRT/Fabric/tensor backend microbenchmark. Not loaded by the harness."
+title = "isaac_sim_backend_comparison"
+version = "6.0.0"
+
+# Headless-friendly window settings; the benchmark runs headless by default but
+# this still produces a valid window when launched with --no-headless.
+[settings.app]
+window.title = "isaac_sim_backend_comparison"
+asyncRendering = true
+fastShutdown = true
+file.ignoreUnsavedOnExit = true
+hangDetector.enabled = false
+renderer.gpuEnumeration.glInterop.enabled = false
+vulkan = true
+
+# Fabric Scene Delegate is the whole point of the benchmark — turn it on.
+useFabricSceneDelegate = true
+
+[settings.app.exts.folders]
+'++' = [
+    "${app}",
+    "${app}/../exts",
+    "${app}/../extscache",
+    "${app}/../extsUser",
+    "${app}/../extsDeprecated",
+]
+
+[settings.exts."omni.kit.registry.nucleus".registries]
+++ = [
+    { name = "isaacsim/prod/6.0", url = "https://ovextensionsprod.blob.core.windows.net/exts/isaacsim/prod/6.0/shared" },
+]
+
+[dependencies]
+# Core — only what the benchmark touches.
+"isaacsim.core.api" = {}
+"isaacsim.core.experimental.prims" = {}
+"isaacsim.core.experimental.utils" = {}
+"isaacsim.core.simulation_manager" = {}
+"isaacsim.simulation_app" = {}
+
+# Physics + Fabric/USDRT bindings.
+"omni.physx.physx" = {}
+"omni.physics.stageupdate" = {}
+"omni.physx.fabric" = {}
+"usdrt.scenegraph" = {}
+
+# Kit runtime plumbing the experimental API needs.
+"omni.kit.loop-isaac" = {}
+"omni.usd.libs" = {}
+
+[settings]
+# Fabric/USDRT — write per-step physics state to Fabric; don't mirror back
+# to the slow-path USD stage.
+app.enableDeveloperWarnings = false
+physics.fabricEnabled = true
+physics.fabricUpdateForceSensors = true
+physics.fabricUpdateJointStates = true
+physics.fabricUpdateTransformations = true
+physics.fabricUpdateVelocities = true
+
+# Slow-path writebacks OFF — Fabric is the source of truth for live state.
+physics.updateForceSensorsToUsd = false
+physics.updateToUsd = false
+omnigraph.updateToUsd = false
+
+# Renderer + Hydra: pair Fabric Scene Delegate with the fast scene delegate.
+omnihydra.useFastSceneDelegate = true
+omnihydra.useSceneGraphInstancing = true
+
+# Quieter log; the benchmark only needs INFO.
+log.fileLogLevel = "info"
+log.level = "info"
+log.outputStreamLevel = "error"
+
+# Performance: don't block on vsync, no rate limit on the main loop.
+app.runLoops.main.rateLimitEnabled = false
+app.vsync = false
