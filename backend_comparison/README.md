@@ -69,7 +69,7 @@ RigidPrim.get_world_poses                       0.6104     0.6044     0.7011    
 ```bash
 ./run_comparison.sh
 # equivalent to:
-NUM_PRIMS=1024 ITERS=500 ./run_comparison.sh usd usdrt
+NUM_PRIMS=1024 ITERS=500 ./run_comparison.sh usd usdrt tensor
 
 # Tweak scale and re-run:
 NUM_PRIMS=4096 ITERS=2000 ./run_comparison.sh usd usdrt
@@ -141,10 +141,11 @@ records them as skipped so the comparison table stays readable.
 
 ## How to read the output
 
-Speedup is reported as `reference / current` expressed as a percentage.
-A value of `+150%` means "the new backend is 1.5× faster than the
-reference" (mean ms of the reference is 1.5× the mean ms of the new
-backend). A negative value means it's slower.
+Speedup is reported as `reference / current` expressed as a multiplier.
+A value of `3.86×` means "this backend is 3.86× faster than the reference"
+(the reference takes 3.86× as long per call). `>1×` is faster; `<1×` is
+slower; `1×` is a tie. The first column is the reference backend's mean
+per-call time in ms.
 
 What to look for:
 

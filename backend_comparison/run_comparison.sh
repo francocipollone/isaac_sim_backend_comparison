@@ -2,7 +2,7 @@
 # Run benchmark_backend.py for each requested backend and emit a comparison report.
 #
 # Usage:
-#   ./run_comparison.sh                    # usd, usdrt
+#   ./run_comparison.sh                    # usd, usdrt, tensor
 #   ./run_comparison.sh usd usdrt          # explicit list
 #   ./run_comparison.sh --num-prims 4096 usd usdrt tensor
 #   NUM_PRIMS=2048 ITERS=1000 ./run_comparison.sh
@@ -27,7 +27,7 @@
 set -euo pipefail
 
 # ---- Defaults ----------------------------------------------------------
-BACKENDS_DEFAULT=(usd usdrt)
+BACKENDS_DEFAULT=(usd usdrt tensor)
 NUM_PRIMS=${NUM_PRIMS:-100}
 ITERS=${ITERS:-500}
 WARMUP=${WARMUP:-50}

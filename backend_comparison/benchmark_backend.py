@@ -153,8 +153,15 @@ orientations = np.tile(np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32), (args.n
 # Spawn the visual + collision mesh...
 for i, path in enumerate(paths):
     Cube(paths=path, positions=positions[i], sizes=0.1)
-# ...then wrap with the prim wrappers. Doing this in the requested backend.
-with backend_utils.use_backend(args.backend, raise_on_unsupported=True):
+# ...then wrap with the prim wrappers. Construction needs a stage-aware
+# backend (usd/usdrt/fabric) because ``RigidPrim.__init__`` looks the prims
+# up via ``get_current_stage()``, which only accepts those three. ``tensor``
+# isn't stage-capable, so we fall back to ``usd`` for construction only when
+# the requested backend is ``tensor``; usd/usdrt modes construct in the
+# requested backend. The operations block below re-opens the requested
+# backend around the actual timed calls.
+construction_backend = "usd" if args.backend == "tensor" else args.backend
+with backend_utils.use_backend(construction_backend, raise_on_unsupported=True):
     rigid = RigidPrim(paths=paths, positions=positions, orientations=orientations)
     xform = XformPrim(paths=paths)
     # GeomPrim always uses the USD path internally; the backend switch is irrelevant here.

@@ -81,8 +81,10 @@ def to_markdown(
     """Render a Markdown table with one row per operation and one column per backend.
 
     The first backend column is the reference; each subsequent column shows the
-    relative speedup (``reference / current``) as a percentage. Skipped
-    operations (backend doesn't support the method) show as ``n/a``.
+    relative speedup (``reference / current``) as a multiplier. ``>1×`` means
+    the compared backend is faster than the reference (lower metric value);
+    ``<1×`` means it is slower; ``1×`` is a tie. Skipped operations (backend
+    doesn't support the method) show as ``n/a``.
     """
     ref_backend = backends[0]
     out: list[str] = []
@@ -97,6 +99,9 @@ def to_markdown(
         out.append(f"- Primitives per call: **{num_prims}**")
     if iters is not None:
         out.append(f"- Iterations per op (excl. warmup): **{iters}**")
+    out.append("- **Speedup convention:** `reference / current`. "
+               "`>1×` = this backend is faster than the reference, "
+               "`<1×` = this backend is slower, `1×` = tie.")
     out.append("")
 
     header = ["operation", ref_backend] + [f"{b} (vs {ref_backend})" for b in backends[1:]]
@@ -109,12 +114,16 @@ def to_markdown(
         for v in row[1:]:
             if ref is None or v is None:
                 cells.append("n/a")
+            elif ref == 0 and v == 0:
+                cells.append(f"{v:.4f}  (ref and current both 0)")
             elif v == 0:
+                cells.append(f"{v:.4f}  (∞× — instantaneous)")
+            elif ref == 0:
                 cells.append(f"{v:.4f}  (ref is 0)")
             else:
-                pct = (ref / v) * 100.0
-                # speedup > 100% means "this backend is faster than the reference"
-                cells.append(f"{v:.4f}  ({pct:+.1f}%)")
+                # ratio > 1× means "this backend is faster than the reference"
+                ratio = ref / v
+                cells.append(f"{v:.4f}  ({ratio:.2f}×)")
         out.append("| " + " | ".join(cells) + " |")
     return "\n".join(out) + "\n"
 
