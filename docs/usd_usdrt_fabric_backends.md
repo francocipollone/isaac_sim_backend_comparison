@@ -52,12 +52,12 @@ Four backend strings appear in the API. They are **not** interchangeable concept
 | `"usd"`    | `pxr.Usd.Stage` (always available)                       | yes      | no             | §1, §4       |
 | `"usdrt"`  | `usdrt.Usd.Stage`                                        | yes      | yes            | §1, §4, §2.5 |
 | `"fabric"` | **Alias for `"usdrt"`** — same `usdrt.Usd.Stage`         | yes      | yes            | §3.3         |
-| `"tensor"` | Warp physics tensor view (not a stage accessor)          | **no**   | different gate | §3.7         |
+| `"tensor"` | Engine simulation view (NumPy/PyTorch/Warp frontends) — not a stage accessor | **no**   | different gate | §3.7         |
 
 **Two terminology traps:**
 
 - **`usdrt` (library) ≠ Fabric (FSD runtime).** They ship as a pair: the library exposes the Python module (`import usdrt`); FSD is the C++ SoA runtime backing the hot path. See §2.5 for the full picture.
-- **`"tensor"` is a third, separate backend.** It only exists on `RigidPrim`, is its **default** if you don't open `use_backend(...)`, and uses **teleport semantics** (writes through the physics tensor view, bypassing PhysX integration). See §3.7.
+- **`"tensor"` is the physics-tensor pathway.** It is one of three peer pathways (USD, Fabric, Tensors) per NVIDIA's docs. It only exists on `RigidPrim` (and `Articulation`), is its **default** if you don't open `use_backend(...)`, and uses **teleport semantics** (writes through the physics tensor view, bypassing engine integration). It is engine-agnostic (works under both PhysX and Newton). See §3.7.
 
 If you only remember three things: (1) `"usdrt"` and `"fabric"` are the same string (§3.3). (2) `"tensor"` is the `RigidPrim` default with teleport semantics (§3.7). (3) `"usdrt"` / `"fabric"` require Fabric Scene Delegate, and the check fires inside `use_backend(...)` (§3.7).
 
@@ -622,6 +622,15 @@ What `enable_fabric` does that the `.kit` file alone **doesn't**:
 The extension itself is loaded at app startup by the experience file, but
 the C++ interface handle is only acquired when `enable_fabric(True)` runs.
 
+**PhysX only.** If you have called
+`SimulationManager.switch_physics_engine("newton")` (or any non-PhysX
+engine), `enable_fabric` is a **silent no-op**: it returns immediately at
+the `if cls._engine != "physx": return` guard, and the carb settings and
+extension load are skipped. Newton handles fabric writes itself via the
+`isaacsim.physics.newton` extension. If you switch engines back to PhysX
+later, you'll need to call `enable_fabric(True)` again. Verify with
+`SimulationManager.is_fabric_enabled()`.
+
 ### 3.3 The `stage_utils.get_current_stage` dispatcher
 
 This is the official helper for grabbing either backend's stage:
@@ -784,12 +793,24 @@ APIs that consult the context:
 | API                                                                                   | What `use_backend("usdrt")` changes about it                                                              |
 | ------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | `stage_utils.get_current_stage(backend=None)`                                         | Returns a `usdrt.Usd.Stage` (otherwise returns `pxr.Usd.Stage`)                                           |
+| `foundation_utils.resolve_value_type_name(type_name, backend=None)`                  | Returns a `usdrt.Sdf.ValueTypeName` (otherwise `pxr.Sdf.ValueTypeName`) — same `["usd", "usdrt", "fabric"]` set as `get_current_stage`                                  |
 | `XformPrim.get_world_poses` / `set_world_poses`                                       | Routes through `_get_fabric_hierarchy().get_world_xform(...)` instead of `pxr.Usd.Attribute.Get` / `.Set` |
-| `RigidPrim.set_world_poses` / `get_world_poses` / `set_velocities` / `get_velocities` | Routes through Fabric's rigid-body view                                                                   |
-| `RigidPrim.set_linear_velocities` / `get_linear_velocities`                           | Routes through Fabric's rigid-body view                                                                   |
-| `RigidPrim.set_angular_velocities` / `get_angular_velocities`                         | Routes through Fabric's rigid-body view                                                                   |
-| `Articulation` (multi-backend methods)                                                | Same — routes through the Fabric hierarchy / FSD view                                                     |
+| `RigidPrim.set_world_poses` / `get_world_poses`                                       | Routes through Fabric's rigid-body view                                                                   |
+| `RigidPrim.set_velocities` / `get_velocities` / `set_linear_velocities` / `get_linear_velocities` / `set_angular_velocities` / `get_angular_velocities` | Routes through the **tensor** view — does **not** route through Fabric — see footnote below                                                                          |
+| `Articulation.fetch_articulation_root_api_prim_paths` (and similar prim-resolution methods) | Routes through the Fabric hierarchy / FSD view (`["usd", "usdrt", "fabric"]`)                            |
+| `Articulation.get_world_poses` / `set_world_poses` (root-pose methods)                | Routes through Fabric (`["tensor", "usd", "usdrt", "fabric"]`) — same supported set as `RigidPrim.set_world_poses`                                                     |
+| `Articulation.get_dof_positions` / `set_dof_positions` / `get_dof_velocities` / `set_dof_velocities` / `get_dof_limits` / `set_dof_position_targets` / `set_dof_velocity_targets` / `get_dof_position_targets` / `get_dof_velocity_targets` | Routes through the **tensor** view (`["tensor", "usd"]`) — same `usdrt`/`fabric` gap as `RigidPrim` velocities, for the same reason (`simulation_manager.py:1041` is PhysX-only, PhysX writes velocities/joints directly through the PhysX velocity API) |
+| `DeformablePrim` (FEM: `get_nodal_positions`, `get_nodal_stresses`, etc.)             | Routes through `usd` first for property/material lookups, then the **tensor** view for nodal data (`["usd", "tensor"]`) — no `usdrt`/`fabric` path. Some getters (`get_element_indices`, `get_nodal_positions`, etc.) are **`tensor`-only** and `assert` on `is_physics_tensor_entity_valid()`; there is no silent `usd` fallback for those. |
 | `GeomPrim.*` (every method)                                                           | **Unaffected** — every method is tagged `Backends: usd` in its docstring                                  |
+
+> **Velocity writes skip `usdrt` and `fabric`.** PhysX writes per-step
+> velocities to Fabric as a side-effect of stepping (via
+> `physics.fabricUpdateVelocities`), but the user-driven
+> `RigidPrim.set_velocities` API writes through the PhysX velocity API
+> directly — not through Fabric. That's why the supported set for all six
+> velocity methods is `["tensor", "usd"]`, not `[..., "usdrt", "fabric"]`.
+> For per-frame reads of physics-driven velocities, read from Fabric
+> directly (it's populated by PhysX each step).
 
 #### The per-method default backend
 
@@ -800,20 +821,49 @@ method's supported-backends list, and **it is not always `usd`**:
 | Wrapper     | Method's supported list                | Default if no `use_backend` is open                 |
 | ----------- | -------------------------------------- | --------------------------------------------------- |
 | `XformPrim` | `["usd", "usdrt", "fabric"]`           | `usd`                                               |
-| `RigidPrim` | `["tensor", "usd", "usdrt", "fabric"]` | **`tensor`** (if physics view is ready) — see below |
+| `RigidPrim` (poses) | `["tensor", "usd", "usdrt", "fabric"]` | **`tensor`** (if physics view is ready) — see below |
+| `RigidPrim` (velocities) | `["tensor", "usd"]`             | **`tensor`** (same caveat)                          |
+| `Articulation` (prim resolution) | `["usd", "usdrt", "fabric"]` | `usd`                                               |
+| `Articulation` (root poses) | `["tensor", "usd", "usdrt", "fabric"]` | **`tensor`** (same caveat)                          |
+| `Articulation` (DOF methods) | `["tensor", "usd"]`             | **`tensor`** (same caveat)                          |
+| `DeformablePrim` (FEM, with `usd` fallback) | `["usd", "tensor"]`        | `usd`                                               |
+| `DeformablePrim` (tensor-only getters) | `["tensor"]`                | **`tensor`** (no `usd` fallback — asserts if physics view not ready) |
 | `GeomPrim`  | every method is `Backends: usd`        | `usd`                                               |
 
-> **Surprise: the `RigidPrim` default is `tensor`, not `usd`.**
+> **Note: the `RigidPrim` default is `tensor`, not `usd`.**
 > `tensor` is the first item of the supported list, and the dispatch reads
 > it positionally. If the physics view is ready (it almost always is by
 > the time you start calling prim methods), your call goes through the
-> tensor path without you ever opening a context. See the next section
-> for the implications.
+> tensor path without you ever opening a context. This matches NVIDIA's
+> framing of Tensor as one of three peer pathways (alongside USD and
+> Fabric); the "surprise" is just that the wrapper picks it for you by
+> default. See the next section for the implications.
 
 To verify, look for the `Backends:` line in the method's docstring and
 treat the first item as the default.
 
 #### The `tensor` backend and its silent fallback
+
+`tensor` is the physics-tensor pathway: a batch read/write view into the
+active engine's state, exposed via `SimulationView` / `RigidBodyView` /
+`ArticulationView` (NumPy / PyTorch / Warp frontends). Three facts
+worth knowing up front:
+
+- **Engine-agnostic.** Both PhysX and Newton expose the same tensor view
+  interface, so the `tensor` backend behaves identically under either
+  engine — `RigidPrim.set_world_poses(backend="tensor")` works the same
+  way whether you have `switch_physics_engine("physx")` or
+  `switch_physics_engine("newton")` active. This is the only backend
+  in the table with that property.
+- **Available only after play.** The physics simulation view is created
+  on the first physics-ready event (after `omni.timeline.play()`). Before
+  play, `is_physics_tensor_entity_valid()` is `False`, and the dispatcher
+  falls back to `usd` (see below).
+- **Teleport semantics.** `RigidPrim.set_world_poses(backend="tensor")`
+  writes directly into the physics tensor view, bypassing PhysX's
+  integrator. On a stack of contacting bodies this can produce
+  unrealistic motion. If you want non-teleport, integrator-respecting
+  writes, use `usdrt` (or `fabric`) instead.
 
 `RigidPrim` has a guard in `_check_for_tensor_backend`:
 

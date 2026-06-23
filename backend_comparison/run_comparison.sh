@@ -28,7 +28,7 @@ set -euo pipefail
 
 # ---- Defaults ----------------------------------------------------------
 BACKENDS_DEFAULT=(usd usdrt tensor)
-NUM_PRIMS=${NUM_PRIMS:-100}
+NUM_PRIMS=${NUM_PRIMS:-50}
 ITERS=${ITERS:-500}
 WARMUP=${WARMUP:-50}
 

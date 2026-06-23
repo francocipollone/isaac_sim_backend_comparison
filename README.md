@@ -14,7 +14,7 @@ for the microbenchmark that exercises the multi-backend hot path of
 docker compose build
 
 # 2. Run the benchmark (the script is mounted at /ws inside the container)
-docker compose run --rm isaac-sim /ws/backend_comparison/run_comparison.sh usd usdrt
+docker compose run --rm isaac-sim /ws/backend_comparison/run_comparison.sh usd usdrt tensor
 
 # 3. Read the artifacts straight off the host (they're bind-mounted):
 ls output/                         # benchmark_usd.json, benchmark_usdrt.json, …
@@ -58,8 +58,16 @@ If you have an Isaac Sim install on the host (release build or pre-built
 package), point `run_comparison.sh` at it via `ISAAC_PATH`:
 
 ```bash
-ISAAC_PATH=/path/to/isaac-sim ./backend_comparison/run_comparison.sh usd usdrt
+ISAAC_PATH=/path/to/isaac-sim ./backend_comparison/run_comparison.sh usd usdrt tensor
 ```
 
 See [`backend_comparison/README.md`](backend_comparison/README.md) for
 benchmark-only docs (CLI flags, output format, caveats).
+
+
+# Appendix
+
+## Useful links
+
+ - https://docs.isaacsim.omniverse.nvidia.com/6.0.0/physics/new_physics_engine.html
+ - https://docs.isaacsim.omniverse.nvidia.com/6.0.0/py/docs/overview/experimental.html#backends

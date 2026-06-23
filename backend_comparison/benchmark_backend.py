@@ -19,13 +19,17 @@
 # http://www.apache.org/licenses/LICENSE-2.0
 """Compare isaacsim.core.experimental.prims performance across USD / USDRT / tensor backends.
 
-Spawns a grid of dynamic cubes and benchmarks the multi-backend hot-path methods
-on the experimental prim wrappers:
+Spawns a grid of dynamic cubes plus a parallel grid of small 2-link revolute-joint
+chains and benchmarks the multi-backend hot-path methods on the experimental prim
+wrappers:
 
   - RigidPrim: set_world_poses, get_world_poses,
               set_velocities, get_velocities
               (linear-only and angular-only variants via set_velocities(...,None)/set_velocities(None,...))
   - XformPrim (inherited): set_world_poses, get_world_poses
+  - Articulation: set_world_poses, get_world_poses (root poses),
+                 set_dof_positions, get_dof_positions,
+                 set_dof_velocities, get_dof_velocities
   - GeomPrim (USD-only baseline): set_collision_approximations, get_collision_approximations
 
 The active backend is selected at runtime via ``backend_utils.use_backend(...)``.
@@ -133,11 +137,17 @@ simulation_app = SimulationApp({"headless": args.headless, "settings": settings}
 
 # 3. ---- Imports (must come after SimulationApp) -----------------------
 import numpy as np  # noqa: E402
+from pxr import UsdGeom, UsdPhysics  # noqa: E402
 
 import isaacsim.core.experimental.utils.backend as backend_utils  # noqa: E402
 import isaacsim.core.experimental.utils.stage as stage_utils  # noqa: E402
 from isaacsim.core.experimental.objects import Cube, GroundPlane  # noqa: E402
-from isaacsim.core.experimental.prims import GeomPrim, RigidPrim, XformPrim  # noqa: E402
+from isaacsim.core.experimental.prims import (
+    Articulation,
+    GeomPrim,
+    RigidPrim,
+    XformPrim,
+)  # noqa: E402
 
 # 4. ---- Stage + prims --------------------------------------------------
 
@@ -150,9 +160,78 @@ positions[:, 0] = np.arange(args.num_prims) * 0.5  # spread out so they don't al
 positions[:, 2] = 1.0
 orientations = np.tile(np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32), (args.num_prims, 1))
 
-# Spawn the visual + collision mesh...
+# Spawn the visual + collision mesh for each cube...
 for i, path in enumerate(paths):
     Cube(paths=path, positions=positions[i], sizes=0.1)
+
+# ...and spawn a parallel grid of small revolute-joint chains for the
+# Articulation row. ``NUM_LINKS_PER_ROBOT`` (default 2) keeps each chain's
+# DOF count minimal so the per-call tensor shape stays at (num_prims, K),
+# matching the spirit of the existing cube grid (one wrapper instance, N
+# underlying prims). Override via the env var ``BENCH_NUM_LINKS`` to sweep.
+import os  # noqa: E402
+
+NUM_LINKS_PER_ROBOT = int(os.environ.get("BENCH_NUM_LINKS", "2"))
+articulation_paths: list[str] = [f"/World/chain_{i:05d}" for i in range(args.num_prims)]
+
+
+def spawn_chain(root_path: str, num_links: int) -> None:
+    """Spawn a single articulation with `num_links` revolute joints at `root_path`.
+
+    Each chain is `base_link` + `num_links` `<link_k>` Cube prims connected by
+    `<joint_k>` revolute joints. Every link carries ``UsdPhysics.RigidBodyAPI``
+    (otherwise PhysX's joint-creation step fails with "no bodies defined at
+    body0 and body1") and ``UsdPhysics.CollisionAPI`` (otherwise PhysX can't
+    auto-compute mass properties from geometry and logs "invalid inertia tensor
+    {1, 1, 1} and a negative mass, small sphere approximated inertia was used"
+    warnings for every body). Every joint sets ``body0`` / ``body1`` relationships
+    pointing at the actual link prims. The chain root carries
+    ``UsdPhysics.ArticulationRootAPI`` so ``Articulation(paths=[root_path])``
+    picks it up.
+    """
+    stage = stage_utils.get_current_stage(backend="usd")
+    UsdGeom.Xform.Define(stage, root_path)
+    UsdPhysics.ArticulationRootAPI.Apply(stage.GetPrimAtPath(root_path))
+
+    def make_link_body(prim_path: str) -> UsdGeom.Cube:
+        """Define a Cube at ``prim_path`` and apply RigidBody + Collision APIs."""
+        cube = UsdGeom.Cube.Define(stage, prim_path)
+        prim = cube.GetPrim()
+        UsdPhysics.RigidBodyAPI.Apply(prim)
+        UsdPhysics.CollisionAPI.Apply(prim)
+        return cube
+
+    # Base link is the kinematic anchor for the chain; first joint's body0
+    # points at it, so it must be a RigidBody too.
+    make_link_body(f"{root_path}/base_link")
+
+    parent_path = f"{root_path}/base_link"
+    for k in range(num_links):
+        link_path = f"{root_path}/link_{k}"
+        joint_path = f"{parent_path}/joint_{k}"
+
+        # Link_k: a rigid body (Cube + RigidBodyAPI + CollisionAPI).
+        make_link_body(link_path)
+
+        # Revolute joint connecting parent_path → link_k. Without body0/body1
+        # relationships pointing at real bodies, PhysX rejects the joint at
+        # simulation start ("no bodies defined at body0 and body1").
+        joint = UsdPhysics.RevoluteJoint.Define(stage, joint_path)
+        joint.CreateBody0Rel().SetTargets([parent_path])
+        joint.CreateBody1Rel().SetTargets([link_path])
+        joint.CreateAxisAttr().Set("Z")
+
+        parent_path = link_path
+
+
+# Authoring a stage needs a stage-aware backend. ``usdrt``/``fabric`` work
+# here too (construct the same Usd.Stage under the hood via the StageCache);
+# ``tensor`` can't author, so we force ``usd`` for the spawn block and let
+# the timed block below switch back to the requested backend.
+with backend_utils.use_backend("usd", raise_on_unsupported=True):
+    for root_path in articulation_paths:
+        spawn_chain(root_path, NUM_LINKS_PER_ROBOT)
+
 # ...then wrap with the prim wrappers. Construction needs a stage-aware
 # backend (usd/usdrt/fabric) because ``RigidPrim.__init__`` looks the prims
 # up via ``get_current_stage()``, which only accepts those three. ``tensor``
@@ -166,6 +245,22 @@ with backend_utils.use_backend(construction_backend, raise_on_unsupported=True):
     xform = XformPrim(paths=paths)
     # GeomPrim always uses the USD path internally; the backend switch is irrelevant here.
     geom = GeomPrim(paths=paths, apply_collision_apis=True)
+    # Articulation wraps one path PER ROBOT (not per joint), so this list is
+    # the same length as `rigid.paths`. ``articulation_paths`` was built
+    # alongside ``paths`` in section 4 above.
+    #
+    # ``reset_xform_op_properties=True`` makes Articulation.__init__ add the
+    # standard xformOp:translate / xformOp:orient / xformOp:scale stack on the
+    # root prim of each chain. Without it, our programmatic spawn (which only
+    # does ``UsdGeom.Xform.Define``) leaves the root without xformOps and the
+    # very first ``set_world_poses`` call asserts with
+    # "Undefined 'xformOp:translate' property for the prim".
+    articulations = Articulation(
+        paths=articulation_paths,
+        positions=positions,
+        orientations=orientations,
+        reset_xform_op_properties=True,
+    )
 
 # Initialize physics so velocity methods have a real PhysX view to read.
 import isaacsim.core.experimental.utils.app as app_utils  # noqa: E402
@@ -222,6 +317,18 @@ _OPERATION_BACKENDS: dict[str, set[str]] = {
     # XformPrim.set_world_poses / get_world_poses: usd, usdrt (NOT tensor).
     "XformPrim.set_world_poses": {"usd", "usdrt"},
     "XformPrim.get_world_poses": {"usd", "usdrt"},
+    # Articulation root poses: same set as RigidPrim.set_world_poses — the
+    # Fabric path is supported.
+    "Articulation.set_world_poses": {"tensor", "usd", "usdrt"},
+    "Articulation.get_world_poses": {"tensor", "usd", "usdrt"},
+    # Articulation DOF methods: tensor + usd ONLY. PhysX writes joint
+    # state through its velocity API directly, so there is no usdrt/fabric
+    # path. Same reason as RigidPrim.set_velocities (see
+    # `usd_usdrt_fabric_backends.md` §3.7 velocity footnote).
+    "Articulation.set_dof_positions": {"tensor", "usd"},
+    "Articulation.get_dof_positions": {"tensor", "usd"},
+    "Articulation.set_dof_velocities": {"tensor", "usd"},
+    "Articulation.get_dof_velocities": {"tensor", "usd"},
     # GeomPrim is USD-only but is timed on every backend as a constant-cost
     # baseline.
     "GeomPrim.set_collision_approximations": {"tensor", "usd", "usdrt"},
@@ -262,8 +369,24 @@ def make_input_velocities():
     return lin, ang
 
 
+def make_input_dof_positions():
+    """Per-iteration DOF position inputs, shape (num_prims, NUM_LINKS_PER_ROBOT)."""
+    return np.random.uniform(
+        low=-0.5, high=0.5, size=(args.num_prims, NUM_LINKS_PER_ROBOT)
+    ).astype(np.float32)
+
+
+def make_input_dof_velocities():
+    """Per-iteration DOF velocity inputs, shape (num_prims, NUM_LINKS_PER_ROBOT)."""
+    return np.random.uniform(
+        low=-1.0, high=1.0, size=(args.num_prims, NUM_LINKS_PER_ROBOT)
+    ).astype(np.float32)
+
+
 input_poses = make_input_poses()
 input_vels = make_input_velocities()
+input_dof_positions = make_input_dof_positions()
+input_dof_velocities = make_input_dof_velocities()
 
 # Pre-bind so the timed lambda is the smallest possible.
 with backend_utils.use_backend(args.backend, raise_on_unsupported=True):
@@ -353,6 +476,61 @@ with backend_utils.use_backend(args.backend, raise_on_unsupported=True):
         maybe_bench(
             "XformPrim.get_world_poses",
             lambda: xform.get_world_poses(),
+            args.iters,
+            args.warmup,
+        )
+    )
+
+    # ---- Articulation (root poses: shape (N, 3) + (N, 4); DOFs: shape (N, K)) ----
+    # Root poses use the same Fabric-aware dispatch as RigidPrim.set_world_poses.
+    # DOF methods only support [tensor, usd] — same PhysX-API-direct reason as
+    # RigidPrim velocities, so usdrt will report these as `skipped`.
+    results.append(
+        maybe_bench(
+            "Articulation.set_world_poses",
+            lambda: articulations.set_world_poses(
+                positions=input_poses[0], orientations=input_poses[1]
+            ),
+            args.iters,
+            args.warmup,
+        )
+    )
+    results.append(
+        maybe_bench(
+            "Articulation.get_world_poses",
+            lambda: articulations.get_world_poses(),
+            args.iters,
+            args.warmup,
+        )
+    )
+    results.append(
+        maybe_bench(
+            "Articulation.set_dof_positions",
+            lambda: articulations.set_dof_positions(positions=input_dof_positions),
+            args.iters,
+            args.warmup,
+        )
+    )
+    results.append(
+        maybe_bench(
+            "Articulation.get_dof_positions",
+            lambda: articulations.get_dof_positions(),
+            args.iters,
+            args.warmup,
+        )
+    )
+    results.append(
+        maybe_bench(
+            "Articulation.set_dof_velocities",
+            lambda: articulations.set_dof_velocities(velocities=input_dof_velocities),
+            args.iters,
+            args.warmup,
+        )
+    )
+    results.append(
+        maybe_bench(
+            "Articulation.get_dof_velocities",
+            lambda: articulations.get_dof_velocities(),
             args.iters,
             args.warmup,
         )
